@@ -1,0 +1,829 @@
+{
+  "name": "WhatsApp Order Bot - Vynkrova",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook",
+      "name": "WhatsApp Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 400]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "whatsapp-webhook",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "node-webhook-verify",
+      "name": "WhatsApp Verify Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 600],
+      "notes": "Meta sends a GET request to verify the webhook. This node handles it."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle Meta webhook verification challenge\nconst query = $input.first().json.query;\nconst VERIFY_TOKEN = 'vynkrova_verify_2025';\n\nif (\n  query['hub.mode'] === 'subscribe' &&\n  query['hub.verify_token'] === VERIFY_TOKEN\n) {\n  return [{ json: { challenge: query['hub.challenge'] } }];\n}\nreturn [{ json: { error: 'Invalid verification token' } }];"
+      },
+      "id": "node-verify-challenge",
+      "name": "Return Verify Challenge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 600]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.challenge }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "node-respond-verify",
+      "name": "Respond Verification",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [700, 600]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract message data from WhatsApp Cloud API payload\nconst body = $input.first().json.body;\n\ntry {\n  const entry = body.entry?.[0];\n  const change = entry?.changes?.[0];\n  const value = change?.value;\n\n  // Ignore status updates (delivery receipts etc)\n  if (value?.statuses) {\n    return [{ json: { skip: true } }];\n  }\n\n  const message = value?.messages?.[0];\n  if (!message) {\n    return [{ json: { skip: true } }];\n  }\n\n  const phone = message.from; // customer phone number\n  const msgType = message.type;\n  const msgText = msgType === 'text' ? message.text.body.trim() : '';\n  const timestamp = message.timestamp;\n  const waId = message.id;\n  const businessPhone = value?.metadata?.phone_number_id;\n\n  return [{\n    json: {\n      phone,\n      msgText,\n      msgType,\n      timestamp,\n      waId,\n      businessPhone,\n      skip: false\n    }\n  }];\n} catch (e) {\n  return [{ json: { skip: true, error: e.message } }];\n}"
+      },
+      "id": "node-extract-message",
+      "name": "Extract Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.skip }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-skip-check",
+      "name": "Skip Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [700, 400]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\": \"ok\"}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-respond-skip",
+      "name": "Respond OK (Skip)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [950, 300]
+    },
+    {
+      "parameters": {
+        "operation": "lookup",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sessions",
+          "mode": "name"
+        },
+        "lookupColumn": "phone",
+        "lookupValue": "={{ $json.phone }}",
+        "options": {
+          "returnAllMatches": false
+        }
+      },
+      "id": "node-get-session",
+      "name": "Get Session",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [950, 480],
+      "notes": "Looks up customer session state from Sessions sheet. Columns: phone, state, cart, lastUpdated"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge message data with session data\nconst msg = $('Skip Check').first().json;\nconst sessionData = $input.first().json;\n\n// If no session found, default to IDLE\nconst session = {\n  phone: msg.phone,\n  state: sessionData?.state || 'IDLE',\n  cart: sessionData?.cart || '',\n  lastUpdated: sessionData?.lastUpdated || ''\n};\n\nreturn [{\n  json: {\n    ...msg,\n    session\n  }\n}];"
+      },
+      "id": "node-merge-session",
+      "name": "Merge Session",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 480]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "rules": [
+            {
+              "value2": "IDLE",
+              "operation": "equal",
+              "value1": "={{ $json.session.state }}"
+            },
+            {
+              "value2": "MENU_SENT",
+              "operation": "equal",
+              "value1": "={{ $json.session.state }}"
+            },
+            {
+              "value2": "AWAITING_CONFIRMATION",
+              "operation": "equal",
+              "value1": "={{ $json.session.state }}"
+            },
+            {
+              "value2": "PAYMENT_PENDING",
+              "operation": "equal",
+              "value1": "={{ $json.session.state }}"
+            }
+          ]
+        }
+      },
+      "id": "node-route-state",
+      "name": "Route by State",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [1450, 480]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Send welcome + menu to customer\nconst PHONE_NUMBER_ID = 'YOUR_PHONE_NUMBER_ID';\nconst ACCESS_TOKEN = 'YOUR_WHATSAPP_ACCESS_TOKEN';\n\nconst menuText = `🍽️ *Welcome to Vynkrova Kitchen!*\\n\\nHere's our menu:\\n\\n` +\n  `1️⃣ Idli (2 pcs) - ₹30\\n` +\n  `2️⃣ Plain Dosa - ₹40\\n` +\n  `3️⃣ Masala Dosa - ₹60\\n` +\n  `4️⃣ Pongal - ₹50\\n` +\n  `5️⃣ Vada (2 pcs) - ₹35\\n` +\n  `6️⃣ Upma - ₹40\\n\\n` +\n  `Reply with your order like:\\n*2 idli, 1 masala dosa, 1 vada*`;\n\nconst payload = {\n  messaging_product: 'whatsapp',\n  to: $json.phone,\n  type: 'text',\n  text: { body: menuText }\n};\n\nreturn [{ json: { payload, phone: $json.phone, PHONE_NUMBER_ID, ACCESS_TOKEN } }];"
+      },
+      "id": "node-prepare-menu",
+      "name": "Prepare Menu",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1700, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $json.PHONE_NUMBER_ID }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": []
+        },
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {}
+      },
+      "id": "node-send-menu",
+      "name": "Send Menu via WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1950, 300]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sessions",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "phone": "={{ $('Merge Session').first().json.phone }}",
+            "state": "MENU_SENT",
+            "cart": "",
+            "lastUpdated": "={{ new Date().toISOString() }}"
+          }
+        },
+        "matchingColumns": ["phone"],
+        "options": {}
+      },
+      "id": "node-update-session-menu",
+      "name": "Update Session: MENU_SENT",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2200, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// -------------------------------------------------------\n// ORDER PARSER — fixes dosa/masala dosa overlap issue\n// Strategy: sort menu items by LENGTH (longest first)\n// so 'masala dosa' is matched before 'dosa'\n// -------------------------------------------------------\n\nconst MENU = [\n  { name: 'masala dosa',  price: 60,  display: 'Masala Dosa'  },\n  { name: 'plain dosa',   price: 40,  display: 'Plain Dosa'   },\n  { name: 'dosa',         price: 40,  display: 'Plain Dosa'   },\n  { name: 'idli',         price: 30,  display: 'Idli (2 pcs)' },\n  { name: 'pongal',       price: 50,  display: 'Pongal'       },\n  { name: 'vada',         price: 35,  display: 'Vada (2 pcs)' },\n  { name: 'upma',         price: 40,  display: 'Upma'         },\n];\n\n// Sort by name length descending — longest match wins\nMENU.sort((a, b) => b.name.length - a.name.length);\n\nconst input = $json.msgText.toLowerCase();\nlet remaining = input;\nconst orderItems = [];\nconst usedItems = new Set();\n\nfor (const item of MENU) {\n  // Regex: optional number before item name, word boundaries\n  const regex = new RegExp(\n    `(?:(\\\\d+)\\\\s*x?\\\\s*|x?(\\\\d+)\\\\s*)?\\\\b${item.name.replace(/\\\\s+/g, '\\\\\\\\s+')}\\\\b`,\n    'gi'\n  );\n\n  let match;\n  while ((match = regex.exec(remaining)) !== null) {\n    const qty = parseInt(match[1] || match[2] || '1', 10);\n    const key = item.name;\n    if (!usedItems.has(key)) {\n      usedItems.add(key);\n      orderItems.push({\n        name: item.display,\n        qty,\n        unitPrice: item.price,\n        subtotal: qty * item.price\n      });\n      // Replace matched text so it won't be re-matched by shorter alias\n      remaining = remaining.replace(match[0], ' '.repeat(match[0].length));\n    }\n  }\n}\n\nif (orderItems.length === 0) {\n  return [{\n    json: {\n      ...($json),\n      parseError: true,\n      errorMsg: \"Sorry, I couldn't understand your order. Please reply with items from the menu, e.g. *2 idli, 1 masala dosa*\"\n    }\n  }];\n}\n\nconst total = orderItems.reduce((s, i) => s + i.subtotal, 0);\nconst orderSummary = orderItems\n  .map(i => `${i.qty}x ${i.name} — ₹${i.subtotal}`)\n  .join('\\n');\n\nreturn [{\n  json: {\n    ...($json),\n    parseError: false,\n    orderItems,\n    total,\n    orderSummary,\n    cartJson: JSON.stringify(orderItems)\n  }\n}];"
+      },
+      "id": "node-parse-order",
+      "name": "Parse Order",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1700, 480]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.parseError }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-parse-error-check",
+      "name": "Parse Error?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1950, 480]
+    },
+    {
+      "parameters": {
+        "jsCode": "const PHONE_NUMBER_ID = 'YOUR_PHONE_NUMBER_ID';\nconst ACCESS_TOKEN = 'YOUR_WHATSAPP_ACCESS_TOKEN';\n\nconst payload = {\n  messaging_product: 'whatsapp',\n  to: $json.phone,\n  type: 'text',\n  text: { body: $json.errorMsg }\n};\n\nreturn [{ json: { payload, PHONE_NUMBER_ID, ACCESS_TOKEN } }];"
+      },
+      "id": "node-prepare-parse-error",
+      "name": "Prepare Parse Error Msg",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 380]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $json.PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.ACCESS_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {}
+      },
+      "id": "node-send-parse-error",
+      "name": "Send Parse Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2450, 380]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate Order ID\nconst orderId = 'ORD' + Date.now().toString().slice(-6);\n\nconst PHONE_NUMBER_ID = 'YOUR_PHONE_NUMBER_ID';\nconst ACCESS_TOKEN = 'YOUR_WHATSAPP_ACCESS_TOKEN';\n\nconst confirmText =\n  `🧾 *Order Summary*\\n\\n` +\n  `${$json.orderSummary}\\n\\n` +\n  `💰 *Total: ₹${$json.total}*\\n\\n` +\n  `Reply *YES* to confirm or *NO* to cancel.`;\n\nconst payload = {\n  messaging_product: 'whatsapp',\n  to: $json.phone,\n  type: 'text',\n  text: { body: confirmText }\n};\n\nreturn [{\n  json: {\n    ...($json),\n    orderId,\n    payload,\n    PHONE_NUMBER_ID,\n    ACCESS_TOKEN\n  }\n}];"
+      },
+      "id": "node-prepare-summary",
+      "name": "Prepare Order Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 560]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $json.PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.ACCESS_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {}
+      },
+      "id": "node-send-summary",
+      "name": "Send Order Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2450, 560]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sessions",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "phone": "={{ $('Prepare Order Summary').first().json.phone }}",
+            "state": "AWAITING_CONFIRMATION",
+            "cart": "={{ $('Prepare Order Summary').first().json.cartJson }}",
+            "orderId": "={{ $('Prepare Order Summary').first().json.orderId }}",
+            "total": "={{ $('Prepare Order Summary').first().json.total }}",
+            "lastUpdated": "={{ new Date().toISOString() }}"
+          }
+        },
+        "matchingColumns": ["phone"],
+        "options": {}
+      },
+      "id": "node-update-session-confirm",
+      "name": "Update Session: AWAITING_CONFIRMATION",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2700, 560]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Customer replied YES or NO\nconst reply = $json.msgText.toUpperCase().trim();\nconst isYes = reply === 'YES' || reply === 'Y' || reply.includes('YES');\nreturn [{ json: { ...($json), isYes } }];"
+      },
+      "id": "node-check-confirm",
+      "name": "Check YES/NO",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1700, 660]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.isYes }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-yes-no-branch",
+      "name": "YES or NO?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1950, 660]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Customer said NO — cancel order\nconst PHONE_NUMBER_ID = 'YOUR_PHONE_NUMBER_ID';\nconst ACCESS_TOKEN = 'YOUR_WHATSAPP_ACCESS_TOKEN';\n\nconst payload = {\n  messaging_product: 'whatsapp',\n  to: $json.phone,\n  type: 'text',\n  text: { body: '❌ Order cancelled. Send *Hi* to start again.' }\n};\n\nreturn [{ json: { payload, PHONE_NUMBER_ID, ACCESS_TOKEN, phone: $json.phone } }];"
+      },
+      "id": "node-prepare-cancel",
+      "name": "Prepare Cancel Msg",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 720]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $json.PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.ACCESS_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {}
+      },
+      "id": "node-send-cancel",
+      "name": "Send Cancel Msg",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2450, 720]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sessions",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "phone": "={{ $('Check YES/NO').first().json.phone }}",
+            "state": "IDLE",
+            "cart": "",
+            "lastUpdated": "={{ new Date().toISOString() }}"
+          }
+        },
+        "matchingColumns": ["phone"],
+        "options": {}
+      },
+      "id": "node-reset-session-cancel",
+      "name": "Reset Session (Cancel)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2700, 720]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Customer confirmed YES — create Razorpay payment link\nconst RAZORPAY_KEY_ID = 'YOUR_RAZORPAY_KEY_ID';\nconst RAZORPAY_KEY_SECRET = 'YOUR_RAZORPAY_KEY_SECRET';\nconst auth = btoa(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`);\n\nconst payload = {\n  amount: $json.session.total * 100, // paise\n  currency: 'INR',\n  accept_partial: false,\n  description: `Order ${$json.session.orderId}`,\n  customer: {\n    contact: `+${$json.phone}`\n  },\n  notify: {\n    sms: false,\n    email: false\n  },\n  reminder_enable: false,\n  notes: {\n    order_id: $json.session.orderId,\n    customer_phone: $json.phone\n  },\n  callback_url: 'https://YOUR_NGROK_URL/webhook/razorpay-callback',\n  callback_method: 'get'\n};\n\nreturn [{\n  json: {\n    ...($json),\n    razorpayPayload: payload,\n    razorpayAuth: auth\n  }\n}];"
+      },
+      "id": "node-prepare-razorpay",
+      "name": "Prepare Razorpay Link",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 580]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.razorpay.com/v1/payment_links",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Basic {{ $json.razorpayAuth }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.razorpayPayload) }}",
+        "options": {}
+      },
+      "id": "node-create-razorpay-link",
+      "name": "Create Razorpay Link",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2450, 580]
+    },
+    {
+      "parameters": {
+        "jsCode": "const PHONE_NUMBER_ID = 'YOUR_PHONE_NUMBER_ID';\nconst ACCESS_TOKEN = 'YOUR_WHATSAPP_ACCESS_TOKEN';\n\nconst paymentLink = $json.short_url;\nconst orderId = $('Check YES/NO').first().json.session.orderId;\nconst total = $('Check YES/NO').first().json.session.total;\n\nconst msgText =\n  `✅ Order confirmed! Here's your payment link:\\n\\n` +\n  `💳 Pay ₹${total}: ${paymentLink}\\n\\n` +\n  `Order ID: *${orderId}*\\nPlease complete payment to proceed.`;\n\nconst payload = {\n  messaging_product: 'whatsapp',\n  to: $('Check YES/NO').first().json.phone,\n  type: 'text',\n  text: { body: msgText }\n};\n\nreturn [{\n  json: {\n    payload,\n    PHONE_NUMBER_ID,\n    ACCESS_TOKEN,\n    phone: $('Check YES/NO').first().json.phone,\n    orderId,\n    total,\n    paymentLink\n  }\n}];"
+      },
+      "id": "node-prepare-payment-msg",
+      "name": "Prepare Payment Msg",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2700, 580]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $json.PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.ACCESS_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {}
+      },
+      "id": "node-send-payment-link",
+      "name": "Send Payment Link",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2950, 580]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sessions",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "phone": "={{ $('Prepare Payment Msg').first().json.phone }}",
+            "state": "PAYMENT_PENDING",
+            "paymentLink": "={{ $('Prepare Payment Msg').first().json.paymentLink }}",
+            "lastUpdated": "={{ new Date().toISOString() }}"
+          }
+        },
+        "matchingColumns": ["phone"],
+        "options": {}
+      },
+      "id": "node-update-session-payment",
+      "name": "Update Session: PAYMENT_PENDING",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [3200, 580]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "razorpay-callback",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-razorpay-webhook",
+      "name": "Razorpay Callback Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 900],
+      "notes": "Razorpay calls this webhook on payment events"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract Razorpay payment status\nconst body = $input.first().json.body;\nconst event = body.event;\nconst paymentLinkId = body.payload?.payment_link?.entity?.id;\nconst paymentId = body.payload?.payment?.entity?.id;\nconst amount = body.payload?.payment?.entity?.amount / 100;\nconst status = body.payload?.payment?.entity?.status;\nconst notes = body.payload?.payment_link?.entity?.notes || {};\nconst orderId = notes.order_id;\nconst customerPhone = notes.customer_phone;\n\nconst isSuccess = event === 'payment_link.paid';\n\nreturn [{\n  json: {\n    event, paymentLinkId, paymentId, amount,\n    status, orderId, customerPhone, isSuccess\n  }\n}];"
+      },
+      "id": "node-parse-razorpay",
+      "name": "Parse Razorpay Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 900]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.isSuccess }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-payment-success-check",
+      "name": "Payment Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [700, 900]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Orders",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "orderId": "={{ $json.orderId }}",
+            "customerPhone": "={{ $json.customerPhone }}",
+            "amount": "={{ $json.amount }}",
+            "paymentId": "={{ $json.paymentId }}",
+            "status": "PAID",
+            "timestamp": "={{ new Date().toISOString() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-log-order",
+      "name": "Log Order to Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [950, 840]
+    },
+    {
+      "parameters": {
+        "jsCode": "const PHONE_NUMBER_ID = 'YOUR_PHONE_NUMBER_ID';\nconst ACCESS_TOKEN = 'YOUR_WHATSAPP_ACCESS_TOKEN';\nconst OWNER_PHONE = 'YOUR_OWNER_WHATSAPP_NUMBER'; // e.g. 919876543210\n\n// Message to customer\nconst customerMsg = {\n  messaging_product: 'whatsapp',\n  to: $json.customerPhone,\n  type: 'text',\n  text: {\n    body: `🎉 *Payment received! Thank you!*\\n\\nOrder ID: *${$json.orderId}*\\nAmount: ₹${$json.amount}\\n\\nYour order is being prepared. Estimated time: 30 mins. 🍽️`\n  }\n};\n\n// Message to owner\nconst ownerMsg = {\n  messaging_product: 'whatsapp',\n  to: OWNER_PHONE,\n  type: 'text',\n  text: {\n    body: `🔔 *New Order Received!*\\n\\nOrder ID: *${$json.orderId}*\\nCustomer: +${$json.customerPhone}\\nAmount: ₹${$json.amount}\\nPayment ID: ${$json.paymentId}\\n\\nPlease prepare the order.`\n  }\n};\n\nreturn [\n  { json: { payload: customerMsg, PHONE_NUMBER_ID, ACCESS_TOKEN, type: 'customer' } },\n  { json: { payload: ownerMsg, PHONE_NUMBER_ID, ACCESS_TOKEN, type: 'owner' } }\n];"
+      },
+      "id": "node-prepare-notifications",
+      "name": "Prepare Notifications",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 840]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $json.PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.ACCESS_TOKEN }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {}
+      },
+      "id": "node-send-notifications",
+      "name": "Send Notifications",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1450, 840]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sessions",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "phone": "={{ $('Parse Razorpay Event').first().json.customerPhone }}",
+            "state": "IDLE",
+            "cart": "",
+            "lastUpdated": "={{ new Date().toISOString() }}"
+          }
+        },
+        "matchingColumns": ["phone"],
+        "options": {}
+      },
+      "id": "node-reset-session-paid",
+      "name": "Reset Session (Paid)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1700, 840]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\": \"ok\"}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-respond-razorpay",
+      "name": "Respond to Razorpay",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1950, 840]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\": \"ok\"}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-respond-wa",
+      "name": "Respond to WhatsApp",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [3450, 480]
+    }
+  ],
+  "connections": {
+    "WhatsApp Webhook": {
+      "main": [[{ "node": "Extract Message", "type": "main", "index": 0 }]]
+    },
+    "WhatsApp Verify Webhook": {
+      "main": [[{ "node": "Return Verify Challenge", "type": "main", "index": 0 }]]
+    },
+    "Return Verify Challenge": {
+      "main": [[{ "node": "Respond Verification", "type": "main", "index": 0 }]]
+    },
+    "Extract Message": {
+      "main": [[{ "node": "Skip Check", "type": "main", "index": 0 }]]
+    },
+    "Skip Check": {
+      "main": [
+        [{ "node": "Respond OK (Skip)", "type": "main", "index": 0 }],
+        [{ "node": "Get Session", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get Session": {
+      "main": [[{ "node": "Merge Session", "type": "main", "index": 0 }]]
+    },
+    "Merge Session": {
+      "main": [[{ "node": "Route by State", "type": "main", "index": 0 }]]
+    },
+    "Route by State": {
+      "main": [
+        [{ "node": "Prepare Menu", "type": "main", "index": 0 }],
+        [{ "node": "Parse Order", "type": "main", "index": 0 }],
+        [{ "node": "Check YES/NO", "type": "main", "index": 0 }],
+        [{ "node": "Respond OK (Skip)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Menu": {
+      "main": [[{ "node": "Send Menu via WhatsApp", "type": "main", "index": 0 }]]
+    },
+    "Send Menu via WhatsApp": {
+      "main": [[{ "node": "Update Session: MENU_SENT", "type": "main", "index": 0 }]]
+    },
+    "Update Session: MENU_SENT": {
+      "main": [[{ "node": "Respond to WhatsApp", "type": "main", "index": 0 }]]
+    },
+    "Parse Order": {
+      "main": [[{ "node": "Parse Error?", "type": "main", "index": 0 }]]
+    },
+    "Parse Error?": {
+      "main": [
+        [{ "node": "Prepare Parse Error Msg", "type": "main", "index": 0 }],
+        [{ "node": "Prepare Order Summary", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Parse Error Msg": {
+      "main": [[{ "node": "Send Parse Error", "type": "main", "index": 0 }]]
+    },
+    "Prepare Order Summary": {
+      "main": [[{ "node": "Send Order Summary", "type": "main", "index": 0 }]]
+    },
+    "Send Order Summary": {
+      "main": [[{ "node": "Update Session: AWAITING_CONFIRMATION", "type": "main", "index": 0 }]]
+    },
+    "Update Session: AWAITING_CONFIRMATION": {
+      "main": [[{ "node": "Respond to WhatsApp", "type": "main", "index": 0 }]]
+    },
+    "Check YES/NO": {
+      "main": [[{ "node": "YES or NO?", "type": "main", "index": 0 }]]
+    },
+    "YES or NO?": {
+      "main": [
+        [{ "node": "Prepare Razorpay Link", "type": "main", "index": 0 }],
+        [{ "node": "Prepare Cancel Msg", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Cancel Msg": {
+      "main": [[{ "node": "Send Cancel Msg", "type": "main", "index": 0 }]]
+    },
+    "Send Cancel Msg": {
+      "main": [[{ "node": "Reset Session (Cancel)", "type": "main", "index": 0 }]]
+    },
+    "Prepare Razorpay Link": {
+      "main": [[{ "node": "Create Razorpay Link", "type": "main", "index": 0 }]]
+    },
+    "Create Razorpay Link": {
+      "main": [[{ "node": "Prepare Payment Msg", "type": "main", "index": 0 }]]
+    },
+    "Prepare Payment Msg": {
+      "main": [[{ "node": "Send Payment Link", "type": "main", "index": 0 }]]
+    },
+    "Send Payment Link": {
+      "main": [[{ "node": "Update Session: PAYMENT_PENDING", "type": "main", "index": 0 }]]
+    },
+    "Update Session: PAYMENT_PENDING": {
+      "main": [[{ "node": "Respond to WhatsApp", "type": "main", "index": 0 }]]
+    },
+    "Razorpay Callback Webhook": {
+      "main": [[{ "node": "Parse Razorpay Event", "type": "main", "index": 0 }]]
+    },
+    "Parse Razorpay Event": {
+      "main": [[{ "node": "Payment Success?", "type": "main", "index": 0 }]]
+    },
+    "Payment Success?": {
+      "main": [
+        [{ "node": "Log Order to Sheets", "type": "main", "index": 0 }],
+        [{ "node": "Respond to Razorpay", "type": "main", "index": 0 }]
+      ]
+    },
+    "Log Order to Sheets": {
+      "main": [[{ "node": "Prepare Notifications", "type": "main", "index": 0 }]]
+    },
+    "Prepare Notifications": {
+      "main": [[{ "node": "Send Notifications", "type": "main", "index": 0 }]]
+    },
+    "Send Notifications": {
+      "main": [[{ "node": "Reset Session (Paid)", "type": "main", "index": 0 }]]
+    },
+    "Reset Session (Paid)": {
+      "main": [[{ "node": "Respond to Razorpay", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": ["whatsapp", "order-bot", "vynkrova"],
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
