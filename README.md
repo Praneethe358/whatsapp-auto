@@ -1,4 +1,4 @@
-# Project Nexus-Order
+# Order Automation
 
 A lightweight event-driven communication orchestration system designed for structured request intake, stateful processing, and asynchronous notification delivery.
 
