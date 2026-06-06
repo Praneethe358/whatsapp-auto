@@ -27,8 +27,7 @@ Tracks interaction progress through predefined lifecycle stages and determines t
 
 Applies parsing, validation, enrichment, and aggregation logic to incoming records before routing them through the workflow.
 
-### Transaction Gateway mechanism
-
+### Transaction Gateway 
 Handles external transaction references and status synchronization through callback mechanisms.
 
 ### Persistence Layer
